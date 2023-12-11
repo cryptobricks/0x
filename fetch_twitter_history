@@ -1,0 +1,848 @@
+# encoding:utf-8
+
+import json
+import os.path
+import random
+import re
+import threading
+import time
+
+import traceback
+import loguru
+import pandas as pd
+import httpx
+from urllib import parse
+import datetime
+
+
+def perpare_header(auth_token):
+    try:
+        url = "https://twitter.com/i/api/graphql/nK1dw4oV3k4w5TdtcAdSww/SearchTimeline"
+
+        headers = {
+            "authority": "twitter.com",
+            "accept": "*/*",
+            "accept-language": "zh-CN,zh;q=0.9",
+            "authorization": "Bearer AAAAAAAAAAAAAAAAAAAAANRILgAAAAAAnNwIzUejRCOuH5E6I8xnZz4puTs%3D1Zv7ttfk8LF81IUq16cHjhLTvJu4FA33AGWWjCpTnA",
+            "cache-control": "no-cache",
+            "cookie": f"auth_token={auth_token};ct0=",
+            "pragma": "no-cache",
+            "referer": "https://twitter.com/",
+            "sec-ch-ua": '"Google Chrome";v="113", "Chromium";v="113", "Not-A.Brand";v="24"',
+            "sec-ch-ua-mobile": "?0",
+            "sec-ch-ua-platform": '"Windows"',
+            "sec-fetch-dest": "empty",
+            "sec-fetch-mode": "cors",
+            "sec-fetch-site": "same-origin",
+            "user-agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/113.0.0.0 Safari/537.36",
+            "x-csrf-token": "",  # ct0
+            "x-twitter-active-user": "yes",
+            "x-twitter-auth-type": "OAuth2Session",
+            "x-twitter-client-language": "zh-cn",
+        }
+
+        client = httpx.Client(headers=headers)
+
+        res1 = client.get(url)
+
+        # 第一次访问用于获取response cookie中的ct0字段，并添加到x-csrf-token与cookie中
+        ct0 = res1.cookies.get("ct0")
+
+        client.headers.update(
+            {"x-csrf-token": ct0, "cookie": f"auth_token={auth_token};ct0={ct0}"}
+        )
+
+        return client.headers
+    except Exception as e:
+        loguru.logger.error(e)
+        time.sleep(3)
+        return perpare_header(random.choice(auth_token_lists))
+
+
+def get_firstPage(q, auth_token):
+    first_page_data = []
+    # 高级查询语句
+    url = "https://twitter.com/i/api/graphql/nK1dw4oV3k4w5TdtcAdSww/SearchTimeline"
+
+    # 获取请求头
+    headers = perpare_header(auth_token)
+
+    variables = {
+        "rawQuery": q,
+        "count": 20,
+        "querySource": "typed_query",
+        "product": "Latest",
+    }
+
+    features = {
+        "rweb_lists_timeline_redesign_enabled": True,
+        "responsive_web_graphql_exclude_directive_enabled": True,
+        "verified_phone_label_enabled": False,
+        "creator_subscriptions_tweet_preview_api_enabled": True,
+        "responsive_web_graphql_timeline_navigation_enabled": True,
+        "responsive_web_graphql_skip_user_profile_image_extensions_enabled": False,
+        "tweetypie_unmention_optimization_enabled": True,
+        "responsive_web_edit_tweet_api_enabled": True,
+        "graphql_is_translatable_rweb_tweet_is_translatable_enabled": True,
+        "view_counts_everywhere_api_enabled": True,
+        "longform_notetweets_consumption_enabled": True,
+        "responsive_web_twitter_article_tweet_consumption_enabled": False,
+        "tweet_awards_web_tipping_enabled": False,
+        "freedom_of_speech_not_reach_fetch_enabled": True,
+        "standardized_nudges_misinfo": True,
+        "tweet_with_visibility_results_prefer_gql_limited_actions_policy_enabled": True,
+        "longform_notetweets_rich_text_read_enabled": True,
+        "longform_notetweets_inline_media_enabled": True,
+        "responsive_web_media_download_video_enabled": False,
+        "responsive_web_enhance_cards_enabled": False,
+    }
+
+    fieldToggles = {"withArticleRichContentState": False}
+
+    parameters = {
+        "variables": json.dumps(variables),
+        "features": json.dumps(features),
+        "fieldToggles": json.dumps(fieldToggles),
+    }
+
+    # *********************** ###########
+
+    with httpx.Client(headers=headers) as client:
+        res2 = client.get(url=url, params=parameters)
+
+    data = res2.json()
+    loguru.logger.info(data)
+    # 第一页数据获取
+    for instruction in data["data"]["search_by_raw_query"]["search_timeline"][
+        "timeline"
+    ]["instructions"]:
+        if instruction["type"] == "TimelineAddEntries":
+            # 获取下一页游标,在entries的倒数一个
+            cursor = data["data"]["search_by_raw_query"]["search_timeline"]["timeline"][
+                "instructions"
+            ][0]["entries"][-1]
+            cursor = cursor["content"]["value"]
+
+            for entry in data["data"]["search_by_raw_query"]["search_timeline"][
+                "timeline"
+            ]["instructions"][0]["entries"]:
+                # 帖子类型
+                if entry.get("entryId").startswith("tweet-"):
+                    # 分两种类型
+                    if (
+                        entry["content"]["itemContent"]["tweet_results"]["result"][
+                            "__typename"
+                        ]
+                        == "Tweet"
+                    ):
+                        entryId = entry.get("entryId").split("-")[-1]
+
+                        create_at = entry["content"]["itemContent"]["tweet_results"][
+                            "result"
+                        ]["legacy"]["created_at"]
+                        # 将字符串时间解析为 datetime 对象
+                        # dt = datetime.datetime.strptime(
+                        #     create_at, '%a %b %d %H:%M:%S %z %Y')
+                        #
+                        # # 将 datetime 对象转换为 UTC 时间戳
+                        # create_at = int(dt.timestamp()) * 1000
+
+                        entities = entry["content"]["itemContent"]["tweet_results"][
+                            "result"
+                        ]["legacy"]["entities"]
+                        extended_entities = entry["content"]["itemContent"][
+                            "tweet_results"
+                        ]["result"]["legacy"].get("extended_entities", "")
+
+                        views = entry["content"]["itemContent"]["tweet_results"][
+                            "result"
+                        ]["views"]
+                        favorite_count = entry["content"]["itemContent"][
+                            "tweet_results"
+                        ]["result"]["legacy"]["favorite_count"]
+                        quote_count = entry["content"]["itemContent"]["tweet_results"][
+                            "result"
+                        ]["legacy"]["quote_count"]
+                        reply_count = entry["content"]["itemContent"]["tweet_results"][
+                            "result"
+                        ]["legacy"]["reply_count"]
+                        retweet_count = entry["content"]["itemContent"][
+                            "tweet_results"
+                        ]["result"]["legacy"]["retweet_count"]
+                        conversation_id_str = entry["content"]["itemContent"][
+                            "tweet_results"
+                        ]["result"]["legacy"]["conversation_id_str"]
+
+                        full_text = entry["content"]["itemContent"]["tweet_results"][
+                            "result"
+                        ]["legacy"]["full_text"]
+
+                        # 回复
+                        in_reply_to_screen_name = entry["content"]["itemContent"][
+                            "tweet_results"
+                        ]["result"]["legacy"].get("in_reply_to_screen_name", "")
+                        in_reply_to_status_id_str = entry["content"]["itemContent"][
+                            "tweet_results"
+                        ]["result"]["legacy"].get("in_reply_to_status_id_str", "")
+                        in_reply_to_user_id_str = entry["content"]["itemContent"][
+                            "tweet_results"
+                        ]["result"]["legacy"].get("in_reply_to_user_id_str", "")
+
+                        is_quote_status = entry["content"]["itemContent"][
+                            "tweet_results"
+                        ]["result"]["legacy"]["is_quote_status"]
+                        retweeted = entry["content"]["itemContent"]["tweet_results"][
+                            "result"
+                        ]["legacy"]["retweeted"]
+
+                        isReply = True if in_reply_to_user_id_str else False
+
+                        # 用户
+                        user_id = entry["content"]["itemContent"]["tweet_results"][
+                            "result"
+                        ]["core"]["user_results"]["result"]["rest_id"]
+                        screen_name = entry["content"]["itemContent"]["tweet_results"][
+                            "result"
+                        ]["core"]["user_results"]["result"]["legacy"]["screen_name"]
+                        profile_image_url_https = entry["content"]["itemContent"][
+                            "tweet_results"
+                        ]["result"]["core"]["user_results"]["result"]["legacy"][
+                            "profile_image_url_https"
+                        ]
+
+                        dict_lists = {}
+                        dict_lists["create_at"] = create_at
+                        dict_lists["entryId"] = entryId
+                        dict_lists["entities"] = entities
+                        dict_lists["in_reply_to_status_id_str"] = str(
+                            in_reply_to_status_id_str
+                        )
+                        dict_lists["in_reply_to_user_id_str"] = in_reply_to_user_id_str
+                        dict_lists["in_reply_to_screen_name"] = in_reply_to_screen_name
+                        dict_lists["user_id"] = user_id
+                        dict_lists["quote_count"] = quote_count
+                        dict_lists["conversation_id_str"] = conversation_id_str
+                        dict_lists["extended_entities"] = extended_entities
+                        dict_lists["full_text"] = full_text
+                        dict_lists["reply_count"] = reply_count
+                        dict_lists["retweet_count"] = retweet_count
+                        dict_lists["favorite_count"] = favorite_count
+                        dict_lists["views"] = views
+                        dict_lists["is_quote_status"] = is_quote_status
+                        dict_lists["retweeted"] = retweeted
+                        dict_lists["isReply"] = isReply
+                        dict_lists["screen_name"] = screen_name
+                        dict_lists["profile_image_url_https"] = profile_image_url_https
+
+                        loguru.logger.info(dict_lists)
+                        first_page_data.append(dict_lists)
+
+                    elif (
+                        entry["content"]["itemContent"]["tweet_results"]["result"][
+                            "__typename"
+                        ]
+                        == "TweetWithVisibilityResults"
+                    ):
+                        entryId = entry.get("entryId").split("-")[-1]
+                        create_at = entry["content"]["itemContent"]["tweet_results"][
+                            "result"
+                        ]["tweet"]["legacy"]["created_at"]
+                        # # 将字符串时间解析为 datetime 对象
+                        # dt = datetime.datetime.strptime(
+                        #     create_at, '%a %b %d %H:%M:%S %z %Y')
+                        #
+                        # # 将 datetime 对象转换为 UTC 时间戳
+                        # create_at = int(dt.timestamp()) * 1000
+
+                        entities = entry["content"]["itemContent"]["tweet_results"][
+                            "result"
+                        ]["tweet"]["legacy"]["entities"]
+                        extended_entities = entry["content"]["itemContent"][
+                            "tweet_results"
+                        ]["result"]["tweet"]["legacy"].get("extended_entities", "")
+
+                        views = entry["content"]["itemContent"]["tweet_results"][
+                            "result"
+                        ]["tweet"]["views"]
+                        favorite_count = entry["content"]["itemContent"][
+                            "tweet_results"
+                        ]["result"]["tweet"]["legacy"]["favorite_count"]
+                        quote_count = entry["content"]["itemContent"]["tweet_results"][
+                            "result"
+                        ]["tweet"]["legacy"]["quote_count"]
+                        reply_count = entry["content"]["itemContent"]["tweet_results"][
+                            "result"
+                        ]["tweet"]["legacy"]["reply_count"]
+                        retweet_count = entry["content"]["itemContent"][
+                            "tweet_results"
+                        ]["result"]["tweet"]["legacy"]["retweet_count"]
+                        conversation_id_str = entry["content"]["itemContent"][
+                            "tweet_results"
+                        ]["result"]["tweet"]["legacy"]["conversation_id_str"]
+
+                        full_text = entry["content"]["itemContent"]["tweet_results"][
+                            "result"
+                        ]["tweet"]["legacy"]["full_text"]
+
+                        # 回复
+                        in_reply_to_screen_name = entry["content"]["itemContent"][
+                            "tweet_results"
+                        ]["result"]["tweet"]["legacy"].get(
+                            "in_reply_to_screen_name", ""
+                        )
+                        in_reply_to_status_id_str = entry["content"]["itemContent"][
+                            "tweet_results"
+                        ]["result"]["tweet"]["legacy"].get(
+                            "in_reply_to_status_id_str", ""
+                        )
+                        in_reply_to_user_id_str = entry["content"]["itemContent"][
+                            "tweet_results"
+                        ]["result"]["tweet"]["legacy"].get(
+                            "in_reply_to_user_id_str", ""
+                        )
+
+                        is_quote_status = entry["content"]["itemContent"][
+                            "tweet_results"
+                        ]["result"]["tweet"]["legacy"]["is_quote_status"]
+                        retweeted = entry["content"]["itemContent"]["tweet_results"][
+                            "result"
+                        ]["tweet"]["legacy"]["retweeted"]
+
+                        isReply = True if in_reply_to_user_id_str else False
+
+                        # 用户
+                        user_id = entry["content"]["itemContent"]["tweet_results"][
+                            "result"
+                        ]["tweet"]["core"]["user_results"]["result"]["rest_id"]
+                        screen_name = entry["content"]["itemContent"]["tweet_results"][
+                            "result"
+                        ]["tweet"]["core"]["user_results"]["result"]["legacy"][
+                            "screen_name"
+                        ]
+                        profile_image_url_https = entry["content"]["itemContent"][
+                            "tweet_results"
+                        ]["result"]["tweet"]["core"]["user_results"]["result"][
+                            "legacy"
+                        ][
+                            "profile_image_url_https"
+                        ]
+
+                        dict_lists = {}
+                        dict_lists["create_at"] = create_at
+                        dict_lists["entryId"] = entryId
+                        dict_lists["entities"] = entities
+                        dict_lists["in_reply_to_status_id_str"] = str(
+                            in_reply_to_status_id_str
+                        )
+                        dict_lists["in_reply_to_user_id_str"] = in_reply_to_user_id_str
+                        dict_lists["in_reply_to_screen_name"] = in_reply_to_screen_name
+                        dict_lists["user_id"] = user_id
+                        dict_lists["quote_count"] = quote_count
+                        dict_lists["conversation_id_str"] = conversation_id_str
+                        dict_lists["extended_entities"] = extended_entities
+                        dict_lists["full_text"] = full_text
+                        dict_lists["reply_count"] = reply_count
+                        dict_lists["retweet_count"] = retweet_count
+                        dict_lists["favorite_count"] = favorite_count
+                        dict_lists["views"] = views
+                        dict_lists["is_quote_status"] = is_quote_status
+                        dict_lists["retweeted"] = retweeted
+                        dict_lists["isReply"] = isReply
+                        dict_lists["screen_name"] = screen_name
+                        dict_lists["profile_image_url_https"] = profile_image_url_https
+
+                        loguru.logger.info(f"奇怪的{dict_lists}")
+                        first_page_data.append(dict_lists)
+
+    return cursor, first_page_data
+
+
+def get_nextPage(q, cursor, data):
+    url = "https://twitter.com/i/api/graphql/nK1dw4oV3k4w5TdtcAdSww/SearchTimeline"
+    next_page_data = []
+    next_page_data.extend(data)
+    print(f"---------------------------------第二页开始--------------------------------")
+
+    headers = perpare_header(random.choice(auth_token_lists))
+
+    variables = {
+        "rawQuery": q,
+        "count": 20,
+        "cursor": cursor,
+        "querySource": "typed_query",
+        "product": "Latest",
+    }
+
+    features = {
+        "rweb_lists_timeline_redesign_enabled": True,
+        "responsive_web_graphql_exclude_directive_enabled": True,
+        "verified_phone_label_enabled": False,
+        "creator_subscriptions_tweet_preview_api_enabled": True,
+        "responsive_web_graphql_timeline_navigation_enabled": True,
+        "responsive_web_graphql_skip_user_profile_image_extensions_enabled": False,
+        "tweetypie_unmention_optimization_enabled": True,
+        "responsive_web_edit_tweet_api_enabled": True,
+        "graphql_is_translatable_rweb_tweet_is_translatable_enabled": True,
+        "view_counts_everywhere_api_enabled": True,
+        "longform_notetweets_consumption_enabled": True,
+        "responsive_web_twitter_article_tweet_consumption_enabled": False,
+        "tweet_awards_web_tipping_enabled": False,
+        "freedom_of_speech_not_reach_fetch_enabled": True,
+        "standardized_nudges_misinfo": True,
+        "tweet_with_visibility_results_prefer_gql_limited_actions_policy_enabled": True,
+        "longform_notetweets_rich_text_read_enabled": True,
+        "longform_notetweets_inline_media_enabled": True,
+        "responsive_web_media_download_video_enabled": False,
+        "responsive_web_enhance_cards_enabled": False,
+    }
+
+    fieldToggles = {"withArticleRichContentState": False}
+
+    while True:
+        parameters = {
+            "variables": json.dumps(variables),
+            "features": json.dumps(features),
+            "fieldToggles": json.dumps(fieldToggles),
+        }
+        try:
+            client = httpx.Client(headers=headers)
+            res2 = client.get(url=url, params=parameters, timeout=300000)
+            if res2.status_code == 200:
+                data = res2.json()
+                loguru.logger.warning(data)
+                # 判断有没有数据
+                instructions = data["data"]["search_by_raw_query"]["search_timeline"][
+                    "timeline"
+                ]["instructions"]
+                loguru.logger.warning(len(instructions))
+                if len(instructions) == 2:
+                    loguru.logger.warning("准备返回数据")
+                    return next_page_data
+
+                # 从第二页开始获取游标
+                for instruction in data["data"]["search_by_raw_query"][
+                    "search_timeline"
+                ]["timeline"]["instructions"]:
+                    if instruction["type"] == "TimelineReplaceEntry":
+                        if instruction["entry"]["entryId"] == "cursor-bottom-0":
+                            cursor = instruction["entry"]["content"]["value"]
+
+                # 更新游标
+                variables["cursor"] = cursor
+
+                # 第二页数据获取
+                for instruction in data["data"]["search_by_raw_query"][
+                    "search_timeline"
+                ]["timeline"]["instructions"]:
+                    if instruction["type"] == "TimelineAddEntries":
+                        for entry in data["data"]["search_by_raw_query"][
+                            "search_timeline"
+                        ]["timeline"]["instructions"][0]["entries"]:
+                            # 帖子类型
+                            if entry.get("entryId").startswith("tweet-"):
+                                # 分两种类型
+                                if (
+                                    entry["content"]["itemContent"]["tweet_results"][
+                                        "result"
+                                    ]["__typename"]
+                                    == "Tweet"
+                                ):
+                                    entryId = entry.get("entryId").split("-")[-1]
+
+                                    create_at = entry["content"]["itemContent"][
+                                        "tweet_results"
+                                    ]["result"]["legacy"]["created_at"]
+                                    # 将字符串时间解析为 datetime 对象
+                                    # dt = datetime.datetime.strptime(
+                                    #     create_at, '%a %b %d %H:%M:%S %z %Y')
+                                    #
+                                    # # 将 datetime 对象转换为 UTC 时间戳
+                                    # create_at = int(dt.timestamp()) * 1000
+
+                                    entities = entry["content"]["itemContent"][
+                                        "tweet_results"
+                                    ]["result"]["legacy"]["entities"]
+                                    extended_entities = entry["content"]["itemContent"][
+                                        "tweet_results"
+                                    ]["result"]["legacy"].get("extended_entities", "")
+
+                                    views = entry["content"]["itemContent"][
+                                        "tweet_results"
+                                    ]["result"]["views"]
+                                    favorite_count = entry["content"]["itemContent"][
+                                        "tweet_results"
+                                    ]["result"]["legacy"]["favorite_count"]
+                                    quote_count = entry["content"]["itemContent"][
+                                        "tweet_results"
+                                    ]["result"]["legacy"]["quote_count"]
+                                    reply_count = entry["content"]["itemContent"][
+                                        "tweet_results"
+                                    ]["result"]["legacy"]["reply_count"]
+                                    retweet_count = entry["content"]["itemContent"][
+                                        "tweet_results"
+                                    ]["result"]["legacy"]["retweet_count"]
+                                    conversation_id_str = entry["content"][
+                                        "itemContent"
+                                    ]["tweet_results"]["result"]["legacy"][
+                                        "conversation_id_str"
+                                    ]
+
+                                    full_text = entry["content"]["itemContent"][
+                                        "tweet_results"
+                                    ]["result"]["legacy"]["full_text"]
+
+                                    # 回复
+                                    in_reply_to_screen_name = entry["content"][
+                                        "itemContent"
+                                    ]["tweet_results"]["result"]["legacy"].get(
+                                        "in_reply_to_screen_name", ""
+                                    )
+                                    in_reply_to_status_id_str = entry["content"][
+                                        "itemContent"
+                                    ]["tweet_results"]["result"]["legacy"].get(
+                                        "in_reply_to_status_id_str", ""
+                                    )
+                                    in_reply_to_user_id_str = entry["content"][
+                                        "itemContent"
+                                    ]["tweet_results"]["result"]["legacy"].get(
+                                        "in_reply_to_user_id_str", ""
+                                    )
+
+                                    is_quote_status = entry["content"]["itemContent"][
+                                        "tweet_results"
+                                    ]["result"]["legacy"]["is_quote_status"]
+                                    # retweeted = \
+                                    #     entry["content"]["itemContent"]["tweet_results"]["result"]["legacy"][
+                                    #         "retweeted"]
+
+                                    isReply = True if in_reply_to_user_id_str else False
+                                    isRetweeted = (
+                                        True if full_text.startswith("RT") else False
+                                    )
+
+                                    # 用户
+                                    user_id = entry["content"]["itemContent"][
+                                        "tweet_results"
+                                    ]["result"]["core"]["user_results"]["result"][
+                                        "rest_id"
+                                    ]
+                                    user_id = str(user_id)
+                                    screen_name = entry["content"]["itemContent"][
+                                        "tweet_results"
+                                    ]["result"]["core"]["user_results"]["result"][
+                                        "legacy"
+                                    ][
+                                        "screen_name"
+                                    ]
+                                    profile_image_url_https = entry["content"][
+                                        "itemContent"
+                                    ]["tweet_results"]["result"]["core"][
+                                        "user_results"
+                                    ][
+                                        "result"
+                                    ][
+                                        "legacy"
+                                    ][
+                                        "profile_image_url_https"
+                                    ]
+
+                                    dict_lists = {}
+                                    dict_lists["create_at"] = create_at
+                                    dict_lists["entryId"] = entryId
+                                    dict_lists["entities"] = entities
+                                    dict_lists["in_reply_to_status_id_str"] = str(
+                                        in_reply_to_status_id_str
+                                    )
+                                    dict_lists[
+                                        "in_reply_to_user_id_str"
+                                    ] = in_reply_to_user_id_str
+                                    dict_lists[
+                                        "in_reply_to_screen_name"
+                                    ] = in_reply_to_screen_name
+                                    dict_lists["user_id"] = user_id
+                                    dict_lists["quote_count"] = quote_count
+                                    dict_lists[
+                                        "conversation_id_str"
+                                    ] = conversation_id_str
+                                    dict_lists["extended_entities"] = extended_entities
+                                    dict_lists["full_text"] = full_text
+                                    dict_lists["reply_count"] = reply_count
+                                    dict_lists["retweet_count"] = retweet_count
+                                    dict_lists["favorite_count"] = favorite_count
+                                    dict_lists["views"] = views
+                                    dict_lists["is_quote_status"] = is_quote_status
+                                    dict_lists["retweeted"] = isRetweeted
+                                    dict_lists["isReply"] = isReply
+                                    dict_lists["screen_name"] = screen_name
+                                    dict_lists[
+                                        "profile_image_url_https"
+                                    ] = profile_image_url_https
+
+                                    loguru.logger.info(dict_lists)
+                                    next_page_data.append(dict_lists)
+
+                                elif (
+                                    entry["content"]["itemContent"]["tweet_results"][
+                                        "result"
+                                    ]["__typename"]
+                                    == "TweetWithVisibilityResults"
+                                ):
+                                    entryId = entry.get("entryId").split("-")[-1]
+                                    create_at = entry["content"]["itemContent"][
+                                        "tweet_results"
+                                    ]["result"]["tweet"]["legacy"]["created_at"]
+                                    # 将字符串时间解析为 datetime 对象
+                                    dt = datetime.datetime.strptime(
+                                        create_at, "%a %b %d %H:%M:%S %z %Y"
+                                    )
+
+                                    # 将 datetime 对象转换为 UTC 时间戳
+                                    create_at = int(dt.timestamp()) * 1000
+
+                                    entities = entry["content"]["itemContent"][
+                                        "tweet_results"
+                                    ]["result"]["tweet"]["legacy"]["entities"]
+                                    extended_entities = entry["content"]["itemContent"][
+                                        "tweet_results"
+                                    ]["result"]["tweet"]["legacy"].get(
+                                        "extended_entities", ""
+                                    )
+
+                                    views = entry["content"]["itemContent"][
+                                        "tweet_results"
+                                    ]["result"]["tweet"]["views"]
+                                    favorite_count = entry["content"]["itemContent"][
+                                        "tweet_results"
+                                    ]["result"]["tweet"]["legacy"]["favorite_count"]
+                                    quote_count = entry["content"]["itemContent"][
+                                        "tweet_results"
+                                    ]["result"]["tweet"]["legacy"]["quote_count"]
+                                    reply_count = entry["content"]["itemContent"][
+                                        "tweet_results"
+                                    ]["result"]["tweet"]["legacy"]["reply_count"]
+                                    retweet_count = entry["content"]["itemContent"][
+                                        "tweet_results"
+                                    ]["result"]["tweet"]["legacy"]["retweet_count"]
+                                    conversation_id_str = entry["content"][
+                                        "itemContent"
+                                    ]["tweet_results"]["result"]["tweet"]["legacy"][
+                                        "conversation_id_str"
+                                    ]
+
+                                    full_text = entry["content"]["itemContent"][
+                                        "tweet_results"
+                                    ]["result"]["tweet"]["legacy"]["full_text"]
+
+                                    # 回复
+                                    in_reply_to_screen_name = entry["content"][
+                                        "itemContent"
+                                    ]["tweet_results"]["result"]["tweet"]["legacy"].get(
+                                        "in_reply_to_screen_name", ""
+                                    )
+                                    in_reply_to_status_id_str = entry["content"][
+                                        "itemContent"
+                                    ]["tweet_results"]["result"]["tweet"]["legacy"].get(
+                                        "in_reply_to_status_id_str", ""
+                                    )
+                                    in_reply_to_user_id_str = entry["content"][
+                                        "itemContent"
+                                    ]["tweet_results"]["result"]["tweet"]["legacy"].get(
+                                        "in_reply_to_user_id_str", ""
+                                    )
+
+                                    is_quote_status = entry["content"]["itemContent"][
+                                        "tweet_results"
+                                    ]["result"]["tweet"]["legacy"]["is_quote_status"]
+                                    # retweeted = \
+                                    # entry["content"]["itemContent"]["tweet_results"]["result"]["tweet"]["legacy"][
+                                    #     "retweeted"]
+
+                                    isReply = True if in_reply_to_user_id_str else False
+                                    isRetweeted = (
+                                        True if full_text.startswith("RT") else False
+                                    )
+                                    # 用户
+                                    user_id = entry["content"]["itemContent"][
+                                        "tweet_results"
+                                    ]["result"]["tweet"]["core"]["user_results"][
+                                        "result"
+                                    ][
+                                        "rest_id"
+                                    ]
+                                    screen_name = entry["content"]["itemContent"][
+                                        "tweet_results"
+                                    ]["result"]["tweet"]["core"]["user_results"][
+                                        "result"
+                                    ][
+                                        "legacy"
+                                    ][
+                                        "screen_name"
+                                    ]
+                                    profile_image_url_https = entry["content"][
+                                        "itemContent"
+                                    ]["tweet_results"]["result"]["tweet"]["core"][
+                                        "user_results"
+                                    ][
+                                        "result"
+                                    ][
+                                        "legacy"
+                                    ][
+                                        "profile_image_url_https"
+                                    ]
+
+                                    dict_lists = {}
+                                    dict_lists["create_at"] = create_at
+                                    dict_lists["entryId"] = entryId
+                                    dict_lists["entities"] = entities
+                                    dict_lists["in_reply_to_status_id_str"] = str(
+                                        in_reply_to_status_id_str
+                                    )
+                                    dict_lists[
+                                        "in_reply_to_user_id_str"
+                                    ] = in_reply_to_user_id_str
+                                    dict_lists[
+                                        "in_reply_to_screen_name"
+                                    ] = in_reply_to_screen_name
+                                    dict_lists["user_id"] = user_id
+                                    dict_lists["quote_count"] = quote_count
+                                    dict_lists[
+                                        "conversation_id_str"
+                                    ] = conversation_id_str
+                                    dict_lists["extended_entities"] = extended_entities
+                                    dict_lists["full_text"] = full_text
+                                    dict_lists["reply_count"] = reply_count
+                                    dict_lists["retweet_count"] = retweet_count
+                                    dict_lists["favorite_count"] = favorite_count
+                                    dict_lists["views"] = views
+                                    dict_lists["is_quote_status"] = is_quote_status
+                                    dict_lists["isRetweet"] = isRetweeted
+                                    dict_lists["isReply"] = isReply
+                                    dict_lists["screen_name"] = screen_name
+                                    dict_lists[
+                                        "profile_image_url_https"
+                                    ] = profile_image_url_https
+
+                                    loguru.logger.info(f"奇怪的{dict_lists}")
+                                    next_page_data.append(dict_lists)
+
+                time.sleep(5)
+            else:
+                time.sleep(3)
+                # 重新生成请求头
+                loguru.logger.warning("重新生成请求头")
+                headers = perpare_header(random.choice(auth_token_lists))
+
+        except Exception as e:
+            loguru.logger.warning(f"{e}||{traceback.format_exc()}")
+            # 重新执行
+            loguru.logger.debug(f"{q} {cursor}")
+
+
+def main(q, auth_token, user):
+    user_data = []
+    print(f"----------------------{q}开启-----------------------")
+    # 第一页
+    cursor, first_page_data = get_firstPage(q, auth_token)
+    # 获取下页
+    user_data.extend(first_page_data)
+    next_page_data = get_nextPage(q=q, cursor=cursor, data=[])
+    user_data.extend(next_page_data)
+    pd.DataFrame(user_data).to_csv(f"{user}.csv", index=False)
+    loguru.logger.info(f"{user}数据下载完成")
+
+
+if __name__ == "__main__":
+    tt = {
+        "@cccbbb001.json": "3bd18d4c33269b49c944205465c00b3a120b0101",
+        "@cccbbb002.json": "4869a23d3b681831019c651b77bf722cdcd071a6",
+        "@cccbbb003.json": "1cb3cde8d795a5f0525a61511dd9fdc4d828028c",
+        "@cccbbb004.json": "b36f2718f2e19212509d21ac90839859b9a4d8ba",
+        "@cccbbb005.json": "e751d909b705aac8e8f4ab9d20b81cc3b3e2721f",
+        "@cccbbb006.json": "5fb106dcc846f43dd6cd40ecc2078190fc83b03d",
+        "@cccbbb008.json": "f098df8449f0d8e0f9f01605b1ad81fbf5dc106c",
+        "@cccbbb009.json": "98caf9643f72b535a006a43d5eaa47c46d5e9181",
+        "@cccbbb0100.json": "18a27d51abf88ead625a35105fd83f8a742b9be5",
+        "@cccbbb011.json": "9821c63b91ca09b7dc0840d9d0947865357387d2",
+        "@cccbbb012a.json": "127912d95b4c409778b7ef786bb360d38928a71c",
+        "@cccbbb013.json": "b43080ec5e08d6e79a059fe52a11ffb4e0739c43",
+        "@cccbbb014.json": "001724b0aefc22508c9b9ed15d0528859c6d89c9",
+        "@cccbbb015.json": "90bf58105b3e65bd4f8afa17b2488040c6544036",
+        "@cccbbb016.json": "ff22e244a111f64db505f05ace95e7a5692d66b2",
+        "@cccbbb017.json": "056fe797f6e794032303f9a831472bb6aa7d56d3",
+        "@cccbbb018.json": "fe91e7b98a40a0fc7357b206d270373f5533156f",
+        "@cccbbb019.json": "8232126dfa81a78e928e6064a3e7f5cc68671c34",
+        "@cccbbb020.json": "18ec3e5eecaa307eb79e93eed080d5d7085dc6be",
+        "@cccbbb021.json": "bb520f52ba98c261a1cd350156747d98766b395e",
+        "@cccbbb022.json": "f82efdfed83a38bc4f87ec9217e4a39b4d14a723",
+        "@cccbbb023.json": "37b053561a42be10404199f4ce880c7a7cec0c39",
+        "@cccbbb024.json": "1016a8bef91c0e153f4510194623a127a9931e53",
+        "@cccbbb025.json": "2eae4b7f727e7896cd4f644adf0335c711a7340f",
+        "@cccbbb026.json": "2eda4386e6330b7a15980fb56d1dd7bccb2a044b",
+        "@cccbbb027.json": "a32cf3ca52c9394f7d089e44cd1668bcb621eb6c",
+        "@cccbbb028.json": "80a360b1125cb15e1f9ad9bba46520ebef1b10fd",
+        "@cccbbb029.json": "b945058567d102f86a3e0400050ece0556a10804",
+        "@cccbbb030.json": "632f79dd2d050bcc5006671c0d1c85e15d52af12",
+        "@cccbbb031.json": "076cc8b5840573c865609e24ca25057249f5d3cd",
+        "@cccbbb032.json": "28a5c0e02f71935d5421db9c6157d41d699afa73",
+        "@cccbbb033a.json": "f90bff573e7ccce2c4b1251750739f0028fd687c",
+        "@cccbbb034.json": "65b3e4407299cad3fe76a5a1cee4deca30b36cce",
+        "@cccbbb035.json": "1c6ebb800608aec45c1372532574d8f56d36270a",
+        "@cccbbb036.json": "9adda958ea99873209d3ff2eb5a393ef2eccf5b8",
+        "@cccbbb037.json": "bf249b286595f4f02c9072114b20661d08e05618",
+        "@cccbbb038.json": "47bcef3c01af7c7a556f5808b4c0d174b24c1cb2",
+        "@cccbbb039.json": "c037e5c02d858ef8625aef9089f9f7358c288b11",
+        "@cccbbb040.json": "66818d961742a1eb0a0b2608cd13e1a0c2dc1828",
+        "@cccbbb041.json": "573ee3995b11994cf6a47322f7fab27a10cd9081",
+        "@cccbbb042.json": "f5e977917bcaada794227108bdd36a56667425b8",
+        "@cccbbb043.json": "86e63bede2a3c04770630a3d4c9347ec76aa2ffc",
+        "@cccbbb044.json": "b09873859b8d15227d2ac5df7aa53ab3a7dbc3e2",
+        "@cccbbb045.json": "86211b2818d789c0d9a16c553d89a24b6a5cb74e",
+        "@cccbbb046.json": "751cd1834774208b63c894967ec3e8d30e192235",
+        "@cccbbb047.json": "9849b2385a44f75fbf2f4c5914c1cfff88f9173b",
+        "@cccbbb048.json": "462133e2daf28e11025ed254e7588d16de3e16b4",
+        "@cccbbb049.json": "e69021c7c920b8c2ad63c6c33c73959f8d6f43a3",
+        "@cccbbb050.json": "9d0ebcbb4911b6f40a635c4b2280d7f7db8e357b",
+        "@cccbbb051.json": "f568f0bffab4f61292ed2ebc73f4a5fdf707aea6",
+        "@cccbbb052.json": "b43b77d9962979b35b1aeddff67e46f8ae1506fb",
+        "@cccbbb053.json": "1f11944e1473aaad17984cdb5c51d7860ec43a57",
+        "@cccbbb054.json": "2170af4f89b7f8a2b8334be0c6c2d839dbfbf7b3",
+        "@cccbbb055.json": "98ca5427c65d6428fbdfc85c06453809a19ea90d",
+        "@cccbbb056.json": "729daed25427d1f0796de3164172da5a4d0105aa",
+        "@cccbbb057.json": "4dd2dafed7d39fd78dbb86c23144a451774d9bda",
+        "@cccbbb058.json": "cf9efec65fd167b82e40375c9d9f96dc4718dc25",
+        "@cccbbb059.json": "f134f3964b567a76056a28a521a6539441ce544b",
+        "@cccbbb060.json": "89b60b491e588c4e2e6204442592e27140af3005",
+    }
+    auth_token_lists = list(tt.values())
+
+    user_lists = [
+        "elonmusk",
+        "BillGates",
+        "JeffBezos",
+        "tim_cook",
+        "satyanadella",
+        "sundarpichai",
+        "jack",
+        "larryellison",
+        "MichaelDell",
+        "Mic",
+    ]
+
+    for i in range(0, len(user_lists), 20):
+        user_20 = user_lists[i : i + 20]
+        tasks = []
+
+        for user in user_20:
+            task = threading.Thread(
+                target=main,
+                args=(
+                    f"from:{user} until:2023-12-15 since:2008-07-01",  # 更改时间
+                    random.choice(auth_token_lists),
+                    user,
+                ),
+            )
+            tasks.append(task)
+
+    _ = [t.start() for t in tasks]
+    __ = [t.join() for t in tasks]
+    loguru.logger.info("20个完成")
